@@ -1,76 +1,111 @@
+import os.path
+from pathlib import Path
+
 import pytest
 import requests
-import scrapy
 
 from integration_tests import req
 
+BASEDIR = os.path.realpath(".").replace("\\", "\\\\")
+with (Path(__file__).absolute().parent.parent / "tests" / "fixtures" / "quotesbot.egg").open("rb") as f:
+    EGG = f.read()
 
-def assert_webservice(method, path, expected, **kwargs):
+
+def assert_response(method, path, expected, **kwargs):
     response = req(method, path, **kwargs)
-    json = response.json()
-    json.pop("node_name")
+    data = response.json()
+    data.pop("node_name")
 
-    assert json == expected
+    assert data == expected
+    assert response.content.endswith(b"\n")
 
 
 @pytest.mark.parametrize(
-    "webservice,method",
+    ("method", "basename"),
     [
-        ("daemonstatus", "GET"),
-        ("addversion", "POST"),
-        ("schedule", "POST"),
-        ("cancel", "POST"),
-        ("status", "GET"),
-        ("listprojects", "GET"),
-        ("listversions", "GET"),
-        ("listspiders", "GET"),
-        ("listjobs", "GET"),
-        ("delversion", "POST"),
-        ("delproject", "POST"),
+        ("GET", "daemonstatus"),
+        ("POST", "addversion"),
+        ("POST", "schedule"),
+        ("POST", "cancel"),
+        ("GET", "status"),
+        ("GET", "listprojects"),
+        ("GET", "listversions"),
+        ("GET", "listspiders"),
+        ("GET", "listjobs"),
+        ("POST", "delversion"),
+        ("POST", "delproject"),
     ],
 )
-def test_options(webservice, method):
-    response = requests.options(f"http://127.0.0.1:6800/{webservice}.json", auth=("hello12345", "67890world"))
-    assert response.status_code == 204, response.status_code
-    assert response.content == b''
-    assert response.headers['Allow'] == f"OPTIONS, HEAD, {method}"
+def test_options(method, basename):
+    response = requests.options(
+        f"http://127.0.0.1:6800/{basename}.json",
+        auth=("hello12345", "67890world"),
+    )
+
+    assert response.status_code == 204, f"204 != {response.status_code}"
+    assert response.headers["Allow"] == f"OPTIONS, HEAD, {method}"
+    assert response.content == b""
+
+
+# ListSpiders, Schedule, Cancel, Status and ListJobs return "project '%b' not found" on directory traversal attempts.
+# The egg storage (in get_project_list, called by get_spider_queues, called by QueuePoller, used by these webservices)
+# would need to find a project like "../project" (which is impossible with the default eggstorage) to not error.
+@pytest.mark.parametrize(
+    ("method", "basename", "params"),
+    [
+        ("post", "addversion", {"version": "v", "egg": EGG}),
+        ("get", "listversions", {}),
+        ("post", "delversion", {"version": "v"}),
+        ("post", "delproject", {}),
+    ],
+)
+def test_project_directory_traversal(method, basename, params):
+    response = getattr(requests, method)(
+        f"http://127.0.0.1:6800/{basename}.json",
+        auth=("hello12345", "67890world"),
+        **{"params" if method == "get" else "data": {"project": "../p", **params}},
+    )
+
+    data = response.json()
+    data.pop("node_name")
+
+    assert response.status_code == 200, f"200 != {response.status_code}"
+    assert data == {"status": "error", "message": "DirectoryTraversalError: ../p"}
 
 
 def test_daemonstatus():
-    assert_webservice(
-        "get",
-        "/daemonstatus.json",
-        {"status": "ok", "running": 0, "pending": 0, "finished": 0}
-    )
+    assert_response("get", "/daemonstatus.json", {"status": "ok", "running": 0, "pending": 0, "finished": 0})
 
 
-def test_schedule():
-    assert_webservice(
+def test_schedule_nonexistent_project():
+    assert_response(
         "post",
         "/schedule.json",
-        {
-            "status": "error",
-            "message": (
-                f'RunnerError: Scrapy {scrapy.__version__} - no active project\n\n'
-                'Unknown command: list\n\n'
-                'Use "scrapy" to see available commands\n'
-            ),
-        },
+        {"status": "error", "message": "project 'nonexistent' not found"},
         data={"project": "nonexistent", "spider": "nospider"},
     )
 
 
-def test_status_nonexistent():
-    assert_webservice(
+def test_status_nonexistent_job():
+    assert_response(
         "get",
         "/status.json",
-        {"status": "ok", "currstate": "unknown"},
+        {"status": "ok", "currstate": None},
         params={"job": "sample"},
     )
 
 
-def test_cancel_nonexistent():
-    assert_webservice(
+def test_status_nonexistent_project():
+    assert_response(
+        "get",
+        "/status.json",
+        {"status": "error", "message": "project 'nonexistent' not found"},
+        params={"job": "sample", "project": "nonexistent"},
+    )
+
+
+def test_cancel_nonexistent_project():
+    assert_response(
         "post",
         "/cancel.json",
         {"status": "error", "message": "project 'nonexistent' not found"},
@@ -79,7 +114,7 @@ def test_cancel_nonexistent():
 
 
 def test_listprojects():
-    assert_webservice(
+    assert_response(
         "get",
         "/listprojects.json",
         {"status": "ok", "projects": []},
@@ -87,7 +122,7 @@ def test_listprojects():
 
 
 def test_listversions():
-    assert_webservice(
+    assert_response(
         "get",
         "/listversions.json",
         {"status": "ok", "versions": []},
@@ -95,49 +130,45 @@ def test_listversions():
     )
 
 
-def test_listspiders_nonexistent():
-    assert_webservice(
+def test_listspiders_nonexistent_project():
+    assert_response(
         "get",
         "/listspiders.json",
-        {
-            "status": "error",
-            "message": (
-                f'RunnerError: Scrapy {scrapy.__version__} - no active project\n\n'
-                'Unknown command: list\n\n'
-                'Use "scrapy" to see available commands\n'
-            ),
-        },
+        {"status": "error", "message": "project 'nonexistent' not found"},
         params={"project": "nonexistent"},
     )
 
 
 def test_listjobs():
-    assert_webservice(
+    assert_response(
         "get",
         "/listjobs.json",
         {"status": "ok", "pending": [], "running": [], "finished": []},
     )
 
 
-def test_delversion_nonexistent():
-    assert_webservice(
-        "post",
-        "/delversion.json",
-        {
-            "status": "error",
-            "message": "FileNotFoundError: [Errno 2] No such file or directory: 'eggs/nonexistent/noegg.egg'",
-        },
-        data={"project": "nonexistent", "version": "noegg"},
+def test_listjobs_nonexistent_project():
+    assert_response(
+        "get",
+        "/listjobs.json",
+        {"status": "error", "message": "project 'nonexistent' not found"},
+        params={"project": "nonexistent"},
     )
 
 
-def test_delproject_nonexistent():
-    assert_webservice(
+def test_delversion_nonexistent_project():
+    assert_response(
+        "post",
+        "/delversion.json",
+        {"status": "error", "message": "version 'nonexistent' not found"},
+        data={"project": "sample", "version": "nonexistent"},
+    )
+
+
+def test_delproject_nonexistent_project():
+    assert_response(
         "post",
         "/delproject.json",
-        {
-            "status": "error",
-            "message": "FileNotFoundError: [Errno 2] No such file or directory: 'eggs/nonexistent'",
-        },
+        {"status": "error", "message": "project 'nonexistent' not found"},
         data={"project": "nonexistent"},
     )

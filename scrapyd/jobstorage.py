@@ -1,69 +1,54 @@
-from datetime import datetime
+"""
+.. versionadded:: 1.3.0
+   Job storage was previously in-memory only and managed by the launcher.
+"""
 
 from zope.interface import implementer
 
+from scrapyd import sqlite
 from scrapyd.interfaces import IJobStorage
-from scrapyd.sqlite import SqliteFinishedJobs
-from scrapyd.utils import sqlite_connection_string
-
-
-def job_log_url(job):
-    return f"/logs/{job.project}/{job.spider}/{job.job}.log"
-
-
-def job_items_url(job):
-    return f"/items/{job.project}/{job.spider}/{job.job}.jl"
-
-
-class Job(object):
-    def __init__(self, project, spider, job=None, start_time=None, end_time=None):
-        self.project = project
-        self.spider = spider
-        self.job = job
-        self.start_time = start_time if start_time else datetime.now()
-        self.end_time = end_time if end_time else datetime.now()
+from scrapyd.launcher import ScrapyProcessProtocol
 
 
 @implementer(IJobStorage)
-class MemoryJobStorage(object):
-
+class MemoryJobStorage:
     def __init__(self, config):
         self.jobs = []
-        self.finished_to_keep = config.getint('finished_to_keep', 100)
+        self.finished_to_keep = config.getint("finished_to_keep", 100)
 
     def add(self, job):
         self.jobs.append(job)
-        del self.jobs[:-self.finished_to_keep]  # keep last x finished jobs
+        del self.jobs[: -self.finished_to_keep]  # keep last x finished jobs
 
     def list(self):
-        return self.jobs
+        return list(self)
 
     def __len__(self):
         return len(self.jobs)
 
     def __iter__(self):
-        for j in self.jobs:
-            yield j
+        yield from reversed(self.jobs)
 
 
 @implementer(IJobStorage)
-class SqliteJobStorage(object):
-
+class SqliteJobStorage:
     def __init__(self, config):
-        self.jstorage = SqliteFinishedJobs(sqlite_connection_string(config, 'jobs'), "finished_jobs")
-        self.finished_to_keep = config.getint('finished_to_keep', 100)
+        self.jobs = sqlite.initialize(sqlite.SqliteFinishedJobs, config, "jobs", "finished_jobs")
+        self.finished_to_keep = config.getint("finished_to_keep", 100)
 
     def add(self, job):
-        self.jstorage.add(job)
-        self.jstorage.clear(self.finished_to_keep)
+        self.jobs.add(job)
+        self.jobs.clear(self.finished_to_keep)
 
     def list(self):
-        return list(self.__iter__())
+        return list(self)
 
     def __len__(self):
-        return len(self.jstorage)
+        return len(self.jobs)
 
     def __iter__(self):
-        for j in self.jstorage:
-            yield Job(project=j[0], spider=j[1], job=j[2],
-                      start_time=j[3], end_time=j[4])
+        for project, spider, jobid, start_time, end_time in self.jobs:
+            job = ScrapyProcessProtocol(project, spider, jobid, env={}, args=[])
+            job.start_time = start_time
+            job.end_time = end_time
+            yield job

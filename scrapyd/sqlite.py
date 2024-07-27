@@ -1,182 +1,161 @@
+import datetime
 import json
+import os
 import sqlite3
-from datetime import datetime
-
-try:
-    from collections.abc import MutableMapping
-except ImportError:
-    from collections import MutableMapping
 
 
-class JsonSqliteDict(MutableMapping):
-    """SQLite-backed dictionary"""
+# The database argument is "jobs" (in SqliteJobStorage), or a project (in SqliteSpiderQueue) from get_spider_queues(),
+# which gets projects from get_project_list(), which gets projects from egg storage. We check for directory traversal
+# in egg storage, instead.
+def initialize(cls, config, database, table):
+    dbs_dir = config.get("dbs_dir", "dbs")
+    if dbs_dir == ":memory:":
+        connection_string = dbs_dir
+    else:
+        if not os.path.exists(dbs_dir):
+            os.makedirs(dbs_dir)
+        connection_string = os.path.join(dbs_dir, f"{database}.db")
 
-    def __init__(self, database=None, table="dict"):
-        self.database = database or ':memory:'
+    return cls(connection_string, table)
+
+
+# https://docs.python.org/3/library/sqlite3.html#sqlite3-adapter-converter-recipes
+def adapt_datetime(val):
+    return val.strftime("%Y-%m-%d %H:%M:%S.%f")
+
+
+def convert_datetime(val):
+    return datetime.datetime.strptime(val.decode(), "%Y-%m-%d %H:%M:%S.%f")
+
+
+sqlite3.register_adapter(datetime.datetime, adapt_datetime)
+sqlite3.register_converter("datetime", convert_datetime)
+
+
+class SqliteMixin:
+    def __init__(self, database, table):
+        self.database = database or ":memory:"
         self.table = table
-        # about check_same_thread: http://twistedmatrix.com/trac/ticket/4040
+        # Regarding check_same_thread, see http://twistedmatrix.com/trac/ticket/4040
         self.conn = sqlite3.connect(self.database, check_same_thread=False)
-        sql = "CREATE TABLE IF NOT EXISTS %s (key blob PRIMARY KEY, value blob)" % table
-        self.conn.execute(sql)
-
-    def __getitem__(self, key):
-        key = self.encode(key)
-        sql = "SELECT value FROM %s WHERE key = ?" % self.table
-        value = self.conn.execute(sql, (key,)).fetchone()
-        if value:
-            return self.decode(value[0])
-        raise KeyError(key)
-
-    def __setitem__(self, key, value):
-        key, value = self.encode(key), self.encode(value)
-        sql = "INSERT OR REPLACE INTO %s (key, value) VALUES (?, ?)" % self.table
-        self.conn.execute(sql, (key, value))
-        self.conn.commit()
-
-    def __delitem__(self, key):
-        key = self.encode(key)
-        sql = "DELETE FROM %s WHERE key = ?" % self.table
-        self.conn.execute(sql, (key,))
-        self.conn.commit()
 
     def __len__(self):
-        sql = "SELECT COUNT(*) FROM %s" % self.table
-        return self.conn.execute(sql).fetchone()[0]
+        return self.conn.execute(f"SELECT COUNT(*) FROM {self.table}").fetchone()[0]
 
-    def __iter__(self):
-        for key in self.iterkeys():
-            yield key
-
-    def iterkeys(self):
-        sql = "SELECT key FROM %s" % self.table
-        return (self.decode(row[0]) for row in self.conn.execute(sql))
-
-    def keys(self):
-        return list(self.iterkeys())
-
-    def itervalues(self):
-        sql = "SELECT value FROM %s" % self.table
-        return (self.decode(row[0]) for row in self.conn.execute(sql))
-
-    def values(self):
-        return list(self.itervalues())
-
-    def iteritems(self):
-        sql = "SELECT key, value FROM %s" % self.table
-        return ((self.decode(row[0]), self.decode(row[1])) for row in self.conn.execute(sql))
-
-    def items(self):
-        return list(self.iteritems())
-
+    # SQLite JSON is enabled by default since 3.38.0 (2022-02-22), and JSONB is available since 3.45.0 (2024-01-15).
+    # https://sqlite.org/json1.html
     def encode(self, obj):
-        return sqlite3.Binary(json.dumps(obj).encode('ascii'))
+        return sqlite3.Binary(json.dumps(obj).encode("ascii"))
 
     def decode(self, obj):
-        return json.loads(bytes(obj).decode('ascii'))
+        return json.loads(bytes(obj).decode("ascii"))
 
 
-class JsonSqlitePriorityQueue(object):
-    """SQLite priority queue. It relies on SQLite concurrency support for
-    providing atomic inter-process operations.
+class JsonSqlitePriorityQueue(SqliteMixin):
+    """
+    SQLite priority queue. It relies on SQLite concurrency support for providing atomic inter-process operations.
+
+    .. versionadded:: 1.0.0
     """
 
     def __init__(self, database=None, table="queue"):
-        self.database = database or ':memory:'
-        self.table = table
-        # about check_same_thread: http://twistedmatrix.com/trac/ticket/4040
-        self.conn = sqlite3.connect(self.database, check_same_thread=False)
-        sql = "CREATE TABLE IF NOT EXISTS %s (id integer PRIMARY KEY, priority real key, message blob)" % table
-        self.conn.execute(sql)
+        super().__init__(database, table)
+
+        self.conn.execute(
+            f"CREATE TABLE IF NOT EXISTS {table} (id integer PRIMARY KEY, priority real key, message blob)"
+        )
 
     def put(self, message, priority=0.0):
-        args = (priority, self.encode(message))
-        sql = "INSERT INTO %s (priority, message) VALUES (?, ?)" % self.table
-        self.conn.execute(sql, args)
+        self.conn.execute(
+            f"INSERT INTO {self.table} (priority, message) VALUES (?, ?)",
+            (priority, self.encode(message)),
+        )
         self.conn.commit()
 
     def pop(self):
-        sql = "SELECT id, message FROM %s ORDER BY priority DESC LIMIT 1" % self.table
-        idmsg = self.conn.execute(sql).fetchone()
-        if idmsg is None:
-            return
-        id, msg = idmsg
-        sql = "DELETE FROM %s WHERE id = ?" % self.table
-        c = self.conn.execute(sql, (id,))
-        if not c.rowcount:  # record vanished, so let's try again
+        row = self.conn.execute(f"SELECT id, message FROM {self.table} ORDER BY priority DESC LIMIT 1").fetchone()
+        if row is None:
+            return None
+        _id, message = row
+
+        # If a row vanished, try again.
+        if not self.conn.execute(f"DELETE FROM {self.table} WHERE id = ?", (_id,)).rowcount:
             self.conn.rollback()
             return self.pop()
+
         self.conn.commit()
-        return self.decode(msg)
+        return self.decode(message)
 
     def remove(self, func):
-        sql = "SELECT id, message FROM %s" % self.table
-        n = 0
-        for id, msg in self.conn.execute(sql):
-            if func(self.decode(msg)):
-                sql = "DELETE FROM %s WHERE id = ?" % self.table
-                c = self.conn.execute(sql, (id,))
-                if not c.rowcount:  # record vanished, so let's try again
+        deleted = 0
+        for _id, message in self.conn.execute(f"SELECT id, message FROM {self.table}"):
+            if func(self.decode(message)):
+                # If a row vanished, try again.
+                if not self.conn.execute(f"DELETE FROM {self.table} WHERE id = ?", (_id,)).rowcount:
                     self.conn.rollback()
                     return self.remove(func)
-                n += 1
+                deleted += 1
+
         self.conn.commit()
-        return n
+        return deleted
 
     def clear(self):
-        self.conn.execute("DELETE FROM %s" % self.table)
+        self.conn.execute(f"DELETE FROM {self.table}")
         self.conn.commit()
 
-    def __len__(self):
-        sql = "SELECT COUNT(*) FROM %s" % self.table
-        return self.conn.execute(sql).fetchone()[0]
-
     def __iter__(self):
-        sql = "SELECT message, priority FROM %s ORDER BY priority DESC" % self.table
-        return ((self.decode(message), priority) for message, priority in self.conn.execute(sql))
-
-    def encode(self, obj):
-        return sqlite3.Binary(json.dumps(obj).encode('ascii'))
-
-    def decode(self, text):
-        return json.loads(bytes(text).decode('ascii'))
+        return (
+            (self.decode(message), priority)
+            for message, priority in self.conn.execute(
+                f"SELECT message, priority FROM {self.table} ORDER BY priority DESC"
+            )
+        )
 
 
-class SqliteFinishedJobs(object):
-    """SQLite finished jobs. """
+class SqliteFinishedJobs(SqliteMixin):
+    """
+    SQLite finished jobs.
+
+    .. versionadded:: 1.3.0
+       Job storage was previously in-memory only.
+    """
 
     def __init__(self, database=None, table="finished_jobs"):
-        self.database = database or ':memory:'
-        self.table = table
-        # about check_same_thread: http://twistedmatrix.com/trac/ticket/4040
-        self.conn = sqlite3.connect(self.database, check_same_thread=False)
-        sql = "CREATE TABLE IF NOT EXISTS %s (id integer PRIMARY KEY, " \
-            "project text, spider text, job text, start_time datetime, end_time datetime)" % table
-        self.conn.execute(sql)
+        super().__init__(database, table)
+
+        self.conn.execute(
+            f"CREATE TABLE IF NOT EXISTS {table} "
+            "(id integer PRIMARY KEY, project text, spider text, job text, start_time datetime, end_time datetime)"
+        )
 
     def add(self, job):
-        args = (job.project, job.spider, job.job, job.start_time, job.end_time)
-        sql = "INSERT INTO %s (project, spider, job, start_time, end_time) VALUES (?, ?, ?, ?, ?)" % self.table
-        self.conn.execute(sql, args)
+        self.conn.execute(
+            f"INSERT INTO {self.table} (project, spider, job, start_time, end_time) VALUES (?, ?, ?, ?, ?)",
+            (job.project, job.spider, job.job, job.start_time, job.end_time),
+        )
         self.conn.commit()
 
     def clear(self, finished_to_keep=None):
-        w = ""
+        where = ""
         if finished_to_keep:
             limit = len(self) - finished_to_keep
             if limit <= 0:
                 return  # nothing to delete
-            w = "WHERE id <= " \
-                "(SELECT max(id) FROM (SELECT id FROM %s ORDER BY end_time LIMIT %d))" % (self.table, limit)
-        sql = "DELETE FROM %s %s" % (self.table, w)
-        self.conn.execute(sql)
+            where = f"WHERE id <= (SELECT max(id) FROM (SELECT id FROM {self.table} ORDER BY end_time LIMIT {limit}))"
+
+        self.conn.execute(f"DELETE FROM {self.table} {where}")
         self.conn.commit()
 
-    def __len__(self):
-        sql = "SELECT COUNT(*) FROM %s" % self.table
-        return self.conn.execute(sql).fetchone()[0]
-
     def __iter__(self):
-        sql = "SELECT project, spider, job, start_time, end_time FROM %s ORDER BY end_time DESC" % self.table
-        return ((j[0], j[1], j[2],
-                datetime.strptime(j[3], "%Y-%m-%d %H:%M:%S.%f"),
-                datetime.strptime(j[4], "%Y-%m-%d %H:%M:%S.%f")) for j in self.conn.execute(sql))
+        return (
+            (
+                project,
+                spider,
+                job,
+                datetime.datetime.strptime(start_time, "%Y-%m-%d %H:%M:%S.%f"),
+                datetime.datetime.strptime(end_time, "%Y-%m-%d %H:%M:%S.%f"),
+            )
+            for project, spider, job, start_time, end_time in self.conn.execute(
+                f"SELECT project, spider, job, start_time, end_time FROM {self.table} ORDER BY end_time DESC"
+            )
+        )

@@ -1,5 +1,3 @@
-.. _news:
-
 Release notes
 =============
 
@@ -11,47 +9,148 @@ Unreleased
 Added
 ~~~~~
 
+- Default webservices can be disabled. See :ref:`config-services`.
+
+Fixed
+~~~~~
+
+- Restore the ``--nodaemon`` (``-n``) option (which Scrapyd enables, regardless), to avoid "option --nodaemon not recognized".
+
+1.5.0b1 (2024-07-25)
+--------------------
+
+This release contains the most changes in a decade. Therefore, a beta release is made first.
+
+Added
+~~~~~
+
+- Add ``version`` (egg version), ``settings`` (Scrapy settings) and ``args`` (spider arguments) to the pending jobs in the response from the :ref:`listjobs.json` webservice.
+- Add ``log_url`` and ``items_url`` to the running jobs in the response from the :ref:`listjobs.json` webservice.
 - Add a :ref:`status.json` webservice, to get the status of a job.
+- Add a :ref:`unix_socket_path` setting, to listen on a Unix socket.
+- Add a :ref:`poller` setting.
 - Respond to HTTP ``OPTIONS`` method requests.
-- Add environment variables to override common options. See :doc:`config`.
+- Add environment variables to override common options. See :ref:`config-envvars`.
 
 Documentation
 ^^^^^^^^^^^^^
 
 - How to add webservices (endpoints). See :ref:`config-services`.
 - How to create Docker images. See :ref:`docker`.
+- How to integrate Scrapy projects, without eggs. See :ref:`config-settings`.
 
 Changed
 ~~~~~~~
 
+- Every :ref:`poll_interval`, up to :ref:`max_proc` processes are started by the default :ref:`poller`, instead of only one process. (The number of running jobs will not exceed :ref:`max_proc`.)
+- Drop support for end-of-life Python version 3.7.
+
+Web UI
+^^^^^^
+
+- Add basic CSS.
 - Add a confirmation dialog to the Cancel button.
 - Add "Last modified" column to the directory listings of log files and item feeds.
-- Drop support for end-of-life Python version 3.7.
+- The Jobs page responds only to HTTP ``GET`` and ``HEAD`` method requests.
 
 API
 ^^^
 
-- If the ``egg`` parameter to the :ref:`addversion.json` webservice is not a ZIP file, use the error message, "egg is not a ZIP file (if using curl, use egg=@path not egg=path)".
-- Clarify some error messages, for example:
+- Clarify error messages, for example:
 
-  - ``'project' parameter is required`` instead of ``'project'``
-  - ``project 'myproject' not found`` instead of ``'myproject'``
-  - ``exception class: message`` instead of ``message``
-  - ``ValueError: Unknown or corrupt egg`` instead of ``TypeError: 'tuple' object is not an iterator``
+  - ``'project' parameter is required``, instead of ``'project'`` (KeyError)
+  - ``project 'myproject' not found``, instead of ``'myproject'`` (KeyError)
+  - ``project 'myproject' not found``, instead of ``Scrapy VERSION - no active project``
+  - ``version 'myversion' not found``, instead of a traceback
+  - ``exception class: message``, instead of ``message``
+  - ``BadEggError``, instead of ``TypeError: 'tuple' object is not an iterator``
+  - Error messages for non-UTF-8 bytes and non-float ``priority``.
+  - "Unsupported method" error messages no longer list ``object`` as an allowed HTTP method
 
 CLI
 ^^^
 
-- Correct the usage message and long description, remove all ``twistd`` subcommands, and remove the ``--nodaemon`` and ``--python=`` options, which it overrides.
-- Run the ``scrapyd.__main__`` module instead of the ``scrapyd.scripts.scrapyd_run`` module.
+- Scrapyd uses ``twisted.logger`` instead of the legacy ``twisted.python.log``. Some system information changes:
+
+  - ``[scrapyd.basicauth#info] Basic authentication ...``, instead of ``[-] ...``
+  - ``[scrapyd.app#info] Scrapyd web console available at ...``, instead of ``[-] ...``
+  - ``[-] Unhandled Error``, instead of ``[_GenericHTTPChannelProtocol,0,127.0.0.1] ...``
+  - Data received from standard error and non-zero exit status codes are logged at error level.
+
+- Correct the usage message and long description.
+- Remove the ``--rundir`` option, which only works if ``*_dir`` settings are absolute paths.
+- Remove the ``--nodaemon`` (``-n``) option, which Scrapyd enables.
+- Remove the ``--python=`` (``-y``) option, which Scrapyd needs to set to its application.
+- Remove all ``twistd`` subcommands (FTP servers, etc.). Run ``twistd``, if needed.
+- Run the ``scrapyd.__main__`` module, instead of the ``scrapyd.scripts.scrapyd_run`` module.
+
+Library
+^^^^^^^
+
+- Move functions from ``scrapyd.utils`` into their callers:
+
+  - ``sorted_versions`` to ``scrapyd.eggstorage``
+  - ``get_crawl_args`` to ``scrapyd.launcher``
+
+- :ref:`jobstorage` uses the ``ScrapyProcessProtocol`` class, by default. If :ref:`jobstorage` is set to ``scrapyd.jobstorage.SqliteJobStorage``, Scrapyd 1.3.0 uses a ``Job`` class, instead. To promote parity, the ``Job`` class is removed.
+- Move the ``activate_egg`` function from the ``scrapyd.eggutils`` module to its caller, the ``scrapyd.runner`` module.
+- Move the ``job_log_url`` and ``job_items_url`` functions into the ``Root`` class, since the ``Root`` class is responsible for file URLs.
+- Change the ``get_crawl_args`` function to no longer convert ``bytes`` to ``str``, as already done by its caller.
+- Change the ``scrapyd.app.create_wrapped_resource`` function to a ``scrapyd.basicauth.wrap_resource`` function.
+- Change the ``scrapyd.utils.sqlite_connection_string`` function to an ``scrapyd.sqlite.initialize`` function.
+- Change the ``get_spider_list`` function to a ``SpiderList`` class.
+- Merge the ``JsonResource`` class into the ``WsResource`` class, removing the ``render_object`` method.
 
 Fixed
 ~~~~~
 
+- Restore support for :ref:`eggstorage` implementations whose ``get()`` methods return file-like objects without ``name`` attributes (1.4.3 regression).
+- If the :ref:`items_dir` setting is a URL and the path component ends with ``/``, the ``FEEDS`` setting no longer contains double slashes.
+- The ``MemoryJobStorage`` class returns finished jobs in reverse chronological order, like the ``SqliteJobStorage`` class.
+- The ``list_projects`` method of the ``SpiderScheduler`` class returns a ``list``, instead of ``dict_keys``.
+- Log errors to Scrapyd's log, even when :ref:`debug` mode is enabled.
+- List the closest ``scrapy.cfg`` file as a :ref:`configuration source<config-sources>`.
+
+API
+^^^
+
+- The ``Content-Length`` header counts the number of bytes, instead of the number of characters.
+- The ``Access-Control-Allow-Methods`` response header contains only the HTTP methods to which webservices respond.
+- The :ref:`listjobs.json` webservice sets the ``log_url`` and ``items_url`` fields to ``null`` if the files don't exist.
 - The :ref:`schedule.json` webservice sets the ``node_name`` field in error responses.
-- The :ref:`cancel.json` webservice now works on Windows.
+- The next pending job for all but one project was unreported by the :ref:`daemonstatus.json` and :ref:`listjobs.json` webservices, and was not cancellable by the :ref:`cancel.json` webservice.
+
+Security
+^^^^^^^^
+
+- The ``FilesystemEggStorage`` class used by the :ref:`listversions.json` webservice escapes project names (used in glob patterns) before globbing, to disallow listing arbitrary directories.
+- The ``FilesystemEggStorage`` class used by the :ref:`runner` and the :ref:`addversion.json`,  :ref:`listversions.json`, :ref:`delversion.json` and :ref:`delproject.json` webservices raises a ``DirectoryTraversalError`` error if the project parameter (used in file paths) would traverse directories.
+- The ``Environment`` class used by the :ref:`launcher` raises a ``DirectoryTraversalError`` error if the project, spider or job parameters (used in file paths) would traverse directories.
+- The :ref:`webui` escapes user input (project names, spider names, and job IDs) to prevent cross-site scripting (XSS).
+
+Platform support
+^^^^^^^^^^^^^^^^
+
+Scrapyd is now tested on macOS and Windows, in addition to Linux.
+
+- The :ref:`cancel.json` webservice now works on Windows, by using SIGBREAK instead of SIGINT or SIGTERM.
+- The :ref:`dbs_dir` setting no longer causes an error if it contains a drive letter on Windows.
+- The :ref:`items_dir` setting is considered a local path if it contains a drive letter on Windows.
 - The :ref:`jobs_to_keep` setting no longer causes an error if a file to delete can't be deleted (for example, if the file is open on Windows).
-- When managing multiple projects, the next pending job for all but one project was unreported by the :ref:`daemonstatus.json` and :ref:`listjobs.json` webservices, and was not cancellable by the :ref:`cancel.json` webservice.
+
+Removed
+~~~~~~~
+
+- Remove support for parsing URLs in :ref:`dbs_dir`, since SQLite writes only to paths or ``:memory:`` (added in 1.4.2).
+- Remove the ``JsonSqliteDict`` and ``UtilsCache`` classes.
+- Remove the ``native_stringify_dict`` function.
+- Remove undocumented and unused internal environment variables:
+
+  - ``SCRAPYD_FEED_URI``
+  - ``SCRAPYD_JOB``
+  - ``SCRAPYD_LOG_FILE``
+  - ``SCRAPYD_SLOT``
+  - ``SCRAPYD_SPIDER``
 
 1.4.3 (2023-09-25)
 ------------------
@@ -72,15 +171,15 @@ Fixed
 Added
 ~~~~~
 
-- Add ``spiderqueue`` configuration option for custom spider queue.
-- Add support for the X-Forwarded-Prefix HTTP header. Rename this header using the :ref:`prefix_header` configuration option.
+- Add a :ref:`spiderqueue` setting. Since this was not previously configurable, the changes below are considered backwards-compatible.
+- Add support for the X-Forwarded-Prefix HTTP header. Rename this header using the :ref:`prefix_header` setting.
 
 Changed
 ~~~~~~~
 
 - ``scrapyd.spiderqueue.SqliteSpiderQueue`` is initialized with a ``scrapyd.config.Config`` object and a project name, rather than a SQLite connection string (i.e. database file path).
-- If ``dbs_dir`` is set to ``:memory:`` or to a URL, it is passed through without modification and without creating a directory to ``scrapyd.jobstorage.SqliteJobStorage`` and ``scrapyd.spiderqueue.SqliteSpiderQueue``.
-- ``scrapyd.utils.get_spider_queues`` defers the creation of the ``dbs_dir`` directory to the spider queue implementation.
+- If :ref:`dbs_dir` is set to ``:memory:`` or to a URL, it is passed through without modification and without creating a directory to ``scrapyd.jobstorage.SqliteJobStorage`` and ``scrapyd.spiderqueue.SqliteSpiderQueue``.
+- ``scrapyd.utils.get_spider_queues`` defers the creation of the :ref:`dbs_dir` directory to the spider queue implementation.
 
 1.4.1 (2023-02-10)
 ------------------
@@ -96,7 +195,7 @@ Fixed
 Added
 ~~~~~
 
-- Add ``items_url`` and ``log_url`` to the response from the :ref:`listjobs.json` webservice. (@mxdev88)
+- Add ``log_url`` and ``items_url`` to the finished jobs in the response from the :ref:`listjobs.json` webservice. (@mxdev88)
 - Scrapy 2.8 support. Scrapyd sets ``LOG_FILE`` and ``FEEDS`` command-line arguments, instead of ``SCRAPY_LOG_FILE`` and ``SCRAPY_FEED_URI`` environment variables.
 - Python 3.11 support.
 - Python 3.12 support. Use ``packaging.version.Version`` instead of ``distutils.LooseVersion``. (@pawelmhm)
@@ -113,9 +212,7 @@ Changed
   - ``SCRAPY_SLOT`` to ``SCRAPYD_SLOT``
   - ``SCRAPY_SPIDER`` to ``SCRAPYD_SPIDER``
 
-  .. attention::
-
-    These are undocumented and unused, and may be removed in future versions. If you use these environment variables, please `report your use in an issue <https://github.com/scrapy/scrapyd/issues>`__.
+  .. attention:: Except for ``SCRAPYD_EGG_VERSION``, these are undocumented and unused, and may be removed in future versions. If you use these environment variables, please `report your use in an issue <https://github.com/scrapy/scrapyd/issues>`__.
 
 Removed
 ~~~~~~~
@@ -136,13 +233,18 @@ Fixed
 Added
 ~~~~~
 
-- Add support for HTTP authentication.
+- Add :ref:`username` and :ref:`password` settings, for HTTP authentication.
+- Add :ref:`jobstorage` and :ref:`eggstorage` settings.
+- Add a ``priority`` argument to the :ref:`schedule.json` webservice.
+- Add ``project`` to all jobs in the response from the :ref:`listjobs.json` webservice.
+- Add shortcut to jobs page to cancel a job using the :ref:`cancel.json` webservice.
+- Python 3.7, 3.8, 3.9, 3.10 support.
+
+Changed
+~~~~~~~
+
 - Make optional the ``project`` argument to the :ref:`listjobs.json` webservice, to easily query for all jobs.
 - Improve HTTP headers across webservices.
-- Add shortcut to jobs page to cancel a job using the :ref:`cancel.json` webservice.
-- Add configuration options for job storage class and egg storage class.
-- Improve test coverage.
-- Python 3.7, 3.8, 3.9, 3.10 support.
 
 Removed
 ~~~~~~~
@@ -164,7 +266,7 @@ Fixed
 ~~~~~
 
 - Fix HTTP header types for newer Twisted versions.
-- ``DeferredQueue`` no longer hides a pending job when reaching ``max_proc``.
+- ``DeferredQueue`` no longer hides a pending job when reaching :ref:`max_proc`.
 - The :ref:`addversion.json` webservice now works on Windows.
 - test: Update binary eggs to be compatible with Scrapy 1.x.
 
@@ -182,15 +284,15 @@ Added
 - Webservice
 
   - Add the :ref:`daemonstatus.json` webservice.
-  - Add a ``_version`` argument to the :ref:`schedule.json` webservice.
+  - Add a ``_version`` argument to the :ref:`schedule.json` and :ref:`listspiders.json` webservices.
   - Add a ``jobid`` argument to the :ref:`schedule.json` webservice.
-  - Add the run's PID to the response of the :ref:`listjobs.json` webservice.
+  - Add ``pid`` to the running jobs in the response from the :ref:`listjobs.json` webservice.
   - Include full tracebacks from Scrapy when failing to get spider list.
     This makes debugging deployment problems easier, but webservice output noisier.
 
 - Website
 
-  - Add ``webroot`` configuration option for website root class.
+  - Add a :ref:`webroot` setting for website root class.
   - Add start and finish times to jobs page.
 
 - Make console script executable.
@@ -201,7 +303,7 @@ Added
 Changed
 ~~~~~~~
 
-- Change ``bind_address`` default to 127.0.0.1, instead of 0.0.0.0, to listen only for connections from localhost.
+- Change :ref:`bind_address` default to 127.0.0.1, instead of 0.0.0.0, to listen only for connections from localhost.
 
 Removed
 ~~~~~~~
@@ -227,7 +329,7 @@ Fixed
 Added
 ~~~~~
 
-- Document and include missing configuration options in ``default_scrapyd.conf``.
+- Document and include missing settings in ``default_scrapyd.conf``.
 - Document the spider queue's ``priority`` argument.
 - Enable some missing tests for the SQLite queues.
 
@@ -251,13 +353,13 @@ Added
 ~~~~~
 
 - Add ``node_name`` (hostname) to webservice responses. (:commit:`fac3a5c`, :commit:`4aebe1c`)
-- Add ``start_time`` to the response from the :ref:`listjobs.json` webservice. (:commit:`6712af9`, :commit:`acd460b`)
+- Add ``start_time`` to the running jobs in the response from the :ref:`listjobs.json` webservice. (:commit:`6712af9`, :commit:`acd460b`)
 
 Changed
 ~~~~~~~
 
-- Move scrapyd-deploy command to `scrapyd-client <https://pypi.org/project/scrapyd-client/>`__ package. (:commit:`c1358dc`, :commit:`c9d66ca`, :commit:`191353e`)
-- Allow remote ``items_dir`` configuration. (:commit:`e261591`, :commit:`35a21db`)
+- Move ``scrapyd-deploy`` command to `scrapyd-client <https://pypi.org/project/scrapyd-client/>`__ package. (:commit:`c1358dc`, :commit:`c9d66ca`, :commit:`191353e`)
+- Allow the :ref:`items_dir` setting to be a URL. (:commit:`e261591`, :commit:`35a21db`)
 - Look for a ``~/.scrapyd.conf`` file in the user's home directory. (:commit:`1fce99b`)
 
 Fixed

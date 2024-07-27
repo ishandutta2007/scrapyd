@@ -7,18 +7,21 @@
 venv
 .vscode
 .idea
+/myproject
 
 # Docs
 /docs/_build
 
 # Tests
-/.coverage
-/_trial_temp
-/dbs
+/.coverage*
 /htmlcov
-/scrapyd.tests.test_*
+/_trial_temp
+/tests.test_*
+
+# CLI
 /scrapyd.conf
 /twistd.pid
+/dbs
 /eggs
 /items
 /logs
